@@ -162,7 +162,7 @@ rr ps
 # then
 rr replay -p 851164
 ```
-But this suffered from the same issues as the normal gdb debugging technique. I was still missing the actual segfault.  
+But this suffered from the same issues as the normal gdb debugging technique. I wasn't catching the segfault.  
 Then I tried some ways to generate a core dump and the one that worked was when I set these:  
 ``` sh
 # (order matters)
@@ -257,7 +257,7 @@ openat(AT_FDCWD, "/home/alex/.cache/radare2/history", O_RDONLY) = 7
 openat(AT_FDCWD, "/usr/bin/ls", O_RDONLY) = 7
 openat(AT_FDCWD, "/usr/bin/ls", O_RDONLY) = 8
 ```
-Those are a lot of files to open. When doing a multicore run this means that all cores are waiting for the kernel to look up the same files, over and over again. Most of the [patch file](https://github.com/AGhebrea/fuzzing_r2/blob/master/patches/fs_fuzzing.patch) is related to the removal of the unnecessary filesystem operations. Also the r2 code must be compiled with *-DR_LOG_DISABLE* and ran with *R2_DEBUG_NOLANG=1* env var set. The compilation flag and the env var remove logging function calls and the loading of some plugins. The plugins did not exist on my machine anyways but radare2 was still querying the filesystem to look for them. Alternatively, if modifying the code isn't easy, the libc shim could be modified to block these using a blacklist, pretty useful. The optimization is worthwhile but I did not properly measure the performance increase, I've observed around 2x increase in exec/sec.  
+When doing a multicore run this means that all cores are waiting for the kernel to look up the same files, over and over again. Most of the [patch file](https://github.com/AGhebrea/fuzzing_r2/blob/master/patches/fs_fuzzing.patch) is related to the removal of the unnecessary filesystem operations. Also the r2 code must be compiled with *-DR_LOG_DISABLE* and ran with *R2_DEBUG_NOLANG=1* env var set. The compilation flag and the env var remove logging function calls and the loading of some plugins. The plugins were not relevant for my use case so it is ok to remove their loading. Alternatively, if modifying the code isn't easy, the libc shim could be modified to block these using a blacklist, pretty useful. The optimization is worthwhile but I did not properly measure the performance increase, I've observed around 2x increase in exec/sec.  
 Essentially to find where the code does the syscalls you can do this in gdb:  
 ``` sh
 catch syscall openat
@@ -268,6 +268,7 @@ catch syscall readlink
 run
 ```
 Alternatively, you could write a gdbscript to print a stacktrace and continue when it encounters each syscall, then remove duplicate stack traces and analyze how to remove the calls.  
+
 More optimization would look like this:  
 - Look at init code and do bare minimum.
 - Look at all syscalls and cull the ones that don't matter in the grand scheme of things.
@@ -284,6 +285,7 @@ As an example, once I got a real crash, the aim was to answer these questions:
 - Why it crashes ?  
 - Exploitable ?  
 - Fixed or moved ?  
+
 After having the answers to these it's easier to start thinking of a fix for the bugs.
 Mostly I use [rr](https://rr-project.org/) to debug the crashes, it makes it easy to get to the root cause. I've made a convenience script for this, [debcrash.sh](https://github.com/AGhebrea/fuzzing_r2/blob/master/workdir/scripts/debcrash.sh), which uses another convenience script, [rrrr.sh](https://github.com/AGhebrea/scripts/blob/master/src/rrrr.sh). The ability to set watchpoints on memory addresses and then go back to previous read/write/execute makes the process seamless.  
 
@@ -330,7 +332,11 @@ if (__glibc_unlikely (contiguous (av)
     && (char *) nextchunk
     >= ((char *) av->top + chunksize(av->top))))
 ```
-And in our case, **nextchunk** points to another memory segment than **av->top**. So the check **(char *) nextchunk >= ((char *) av->top + chunksize(av->top)** will always be true.
+And in our case, **nextchunk** points to another memory segment than **av->top**. So the check 
+``` c
+(char *) nextchunk >= ((char *) av->top + chunksize(av->top)
+```
+will always be true.
 
 # What I would do differently next time:
 - Do a shim if possible and leave code modifications out of it.
@@ -339,3 +345,4 @@ And in our case, **nextchunk** points to another memory segment than **av->top**
 - Devise a faster way to determine go/no go, for example a lot of time was wasted by running "fuzzing campaigns" with libc shim versions that had bugs in them, rendering fuzzing useless. I was thinking of setting up a gdb script that debugs the target once, seeing if it arrives at certain code locations and if it processes data correctly.
 - Experiment with writing custom harnesses that do not touch certain file bytes. For example, magic bytes.
 - Try out the sed trick mentioned previously to replace versioned symbols in the target binary.
+- Write a harness for **libr_bin.so** and documenting fuzzing performance increase.
