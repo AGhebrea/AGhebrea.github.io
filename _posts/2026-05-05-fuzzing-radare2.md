@@ -6,8 +6,8 @@ date: 2026-05-05
 
 # Intro
 Radare2 is a widely used open-source reverse engineering framework.  
-After reading [tmpout 1/5](https://tmpout.sh/1/5.html) I decided to point AFL++ at it, partly for practice, partly to see what would shake loose.  
-What follows is a condensed version of my notes from the campaign. I found three crashes: a NULL deref, a double free, and a heap corruption. But the more interesting problems were in the setup itself, a multicore configuration where AFL++ instances silently stalled because pipe buffers filled up, and an afl-cmin crash that was manifesting because afl-cmin's forkserver handshake doesn't complete the way afl-fuzz does.  
+After reading [tmpout 1/5](https://tmpout.sh/1/5.html) I decided to point [AFL++](https://github.com/aflplusplus/aflplusplus) at it, partly for practice, partly to see what would shake loose.  
+What follows is a condensed version of my notes from the campaign. I found three crashes: a NULL deref, a double free and a heap corruption. But the more interesting problems were in the setup itself, a multicore configuration where AFL++ instances silently stalled because pipe buffers filled up, and an afl-cmin crash that was manifesting because afl-cmin's forkserver handshake doesn't complete the way afl-fuzz does.  
 There's also a [github repo](https://github.com/AGhebrea/fuzzing_r2/) with all the setup scripts.  
 
 # Fuzzing setup & Target harness
@@ -28,7 +28,7 @@ After reading some of the docs (listed below) I decided to use the **LLVM LTO** 
 I took the example from [README.persistent_mode.md](https://github.com/AFLplusplus/AFLplusplus/blob/stable/instrumentation/README.persistent_mode.md) and added the check for the **--fuzzing_loop** argument. The code works both under afl++ instrumentation and standalone to facilitate debugging.  
 
 ## libc shim
-The first thing that I tried was naturally naive and got me nowhere. I wanted to modify the target code to accommodate persistent mode. I spent more time than I'd like to admit trying to fixup radare2 file reading logic. I wanted it to read from **__AFL_FUZZ_TESTCASE_BUF** instead of using the libc **_open_**/**_read_** etc. It was much like a whack-a-mole game, one fix revealed another bug. Eventually I figured out that I could just do a libc shim and solve all of my problems by just providing my own **_open_**/**_read_** implementation which would read from **__AFL_FUZZ_TESTCASE_BUF** instead of the input file.  
+The first thing that I tried was naturally naive and got me nowhere. I wanted to modify the target code to accommodate persistent mode. I spent more time than I'd like to admit trying to fixup radare2 file reading logic. I wanted it to read from **__AFL_FUZZ_TESTCASE_BUF** instead of using the libc **_open_**/**_read_** etc. It was much like game of whack-a-mole: one modification introduced a bug, a fix revealed another bug. Eventually I figured out that I could just do a libc shim and solve all of my problems by just providing my own **_open_**/**_read_** implementation which would read from **__AFL_FUZZ_TESTCASE_BUF** instead of the input file.  
 For example, the _**open**_ function wrapper is pretty simple:  
 ``` c
 #define FILE_DESC_MAGIC_VAL 999
@@ -74,6 +74,7 @@ __attribute__((constructor)) void init_state()
 }
 ```
 I've repeated the process for all of the functions that I needed to hook. There is some functionality missing, e.g I don't keep track of **_dup_**, **_dup2_**, **_fcntl_** but for radare2 this worked fine.  
+
 Instead of doing the symbol versioning and definition madness, e.g:  
 ``` c
 __asm__(".symver hook_open, open@GLIBC_2.2.5");
@@ -86,11 +87,12 @@ I could've tried to use sed to replace the strings **open@GLIBC_2.2.5**, **open6
 
 ## Multicore script
 The script is inspired from the post [scaling_afl](https://gamozolabs.github.io/fuzzing/2018/09/16/scaling_afl.html)  
-The job of the script is to run afl-fuzz on each available core. It sets up the environment, uses numactl to run afl-fuzz and has a configuration mechanism, you essentially call  
+The job of the script is to run afl-fuzz on each available core. It sets up the environment, uses numactl to run afl-fuzz.  
+It also has a configuration mechanism, you essentially call  
 ``` python
 ca.setConfig(CPUConfig(asan=False,  arg="-S", power="coe"),         10)
 ```
-to tell it to run 10 slave cores on **coe** power schedule
+to tell it to run 10 slave cores on **coe** power schedule.  
 The meat of the [script](https://github.com/AGhebrea/fuzzing_r2/blob/master/workdir/scripts/multicore.py) is this:
 ``` python
   arr = [
@@ -169,8 +171,8 @@ sudo sysctl -w fs.suid_dumpable=2
 ```
 and then loading with AFL_PRELOAD [catchsegv.so](https://github.com/AGhebrea/fuzzing_r2/blob/master/catchsegv/catchsegv.c)  
 Then I could finally look at a core dump and see what was going on.  
-After getting the core dump, I was able to find the root cause. The target was compiled with afl-clang-lto. In the crashing code, __afl_area_ptr which was stored in the .data segment, was dereferenced, yielding __afl_area_initial (the static fallback bitmap). The instrumentation then wrote to __afl_area_initial + 0x14000, which falls outside the bounds of __afl_area_initial and into a different segment entirely, causing the segfault.  
-The bug is that __afl_area_initial is a fixed-size static buffer (0x10000 bytes), but LTO instrumentation assigned an edge ID of 0x14000, which exceeds it. This only manifests under afl-cmin because in that context the forkserver handshake does not complete correctly, leaving __afl_area_ptr pointing at the fallback __afl_area_initial instead of the properly sized shared memory region. Under afl-fuzz and afl-showmap, the handshake succeeds, __afl_area_ptr is updated to the real SHM, and the write is in bounds.  
+After getting the core dump, I was able to find the root cause. The target was compiled with afl-clang-lto. In the crashing code, *__afl_area_ptr* which was stored in the .data segment, was dereferenced, yielding *__afl_area_initial* (the static fallback bitmap). The instrumentation then wrote to *__afl_area_initial* + 0x14000, which falls outside the bounds of *__afl_area_initial* and into a different segment entirely, causing the segfault.  
+The bug is that *__afl_area_initial* is a fixed-size static buffer (0x10000 bytes), but LTO instrumentation assigned an edge ID of 0x14000, which exceeds it. This only manifests under afl-cmin because in that context the forkserver handshake does not complete correctly, leaving *__afl_area_ptr* pointing at the fallback *__afl_area_initial* instead of the properly sized shared memory region. Under afl-fuzz and afl-showmap, the handshake succeeds, *__afl_area_ptr* is updated to the real SHM, and the write is in bounds.  
 A fix was to compile using afl-clang-fast or, even simpler, to just set the env var AFL_MAP_SIZE to a sufficiently large power of two (e.g 262144).  
 The final script: [afl-cmin.sh](https://github.com/AGhebrea/fuzzing_r2/blob/master/workdir/scripts/aux/afl-cmin.sh)  
 
@@ -255,7 +257,7 @@ openat(AT_FDCWD, "/home/alex/.cache/radare2/history", O_RDONLY) = 7
 openat(AT_FDCWD, "/usr/bin/ls", O_RDONLY) = 7
 openat(AT_FDCWD, "/usr/bin/ls", O_RDONLY) = 8
 ```
-Those are a lot of files to open. When doing a multicore run this means that all cores are waiting for the kernel to look up the same files, over and over again. Most of the [patch file](https://github.com/AGhebrea/fuzzing_r2/blob/master/patches/fs_fuzzing.patch) is related to the removal of the unnecessary filesystem operations. Also the r2 code must be compiled with -DR_LOG_DISABLE and ran with R2_DEBUG_NOLANG=1 env var set. The compilation flag and the env var remove logging function calls and the loading of some plugins, which did not exist on my machine anyways but were still querying the filesystem. Alternatively, if modifying the code isn't easy, the libc shim could be modified to block these using a blacklist, pretty useful. The optimization is worthwhile but I did not properly measure the performance increase, I've observed around 2x increase in exec/sec.  
+Those are a lot of files to open. When doing a multicore run this means that all cores are waiting for the kernel to look up the same files, over and over again. Most of the [patch file](https://github.com/AGhebrea/fuzzing_r2/blob/master/patches/fs_fuzzing.patch) is related to the removal of the unnecessary filesystem operations. Also the r2 code must be compiled with *-DR_LOG_DISABLE* and ran with *R2_DEBUG_NOLANG=1* env var set. The compilation flag and the env var remove logging function calls and the loading of some plugins. The plugins did not exist on my machine anyways but radare2 was still querying the filesystem to look for them. Alternatively, if modifying the code isn't easy, the libc shim could be modified to block these using a blacklist, pretty useful. The optimization is worthwhile but I did not properly measure the performance increase, I've observed around 2x increase in exec/sec.  
 Essentially to find where the code does the syscalls you can do this in gdb:  
 ``` sh
 catch syscall openat
@@ -270,7 +272,10 @@ More optimization would look like this:
 - Look at init code and do bare minimum.
 - Look at all syscalls and cull the ones that don't matter in the grand scheme of things.
 - Look at all memory init/alloc/free and cull ones that don't matter.
+
 I felt like this was a bit more work than it was worth to me and I settled on just having the filesystem patch which was easier to maintain than a more intrusive patch.  
+
+Alternatively, fuzzing can be done only with the libraries, e.g writing a harness for ***libr_bin.so*** and fuzzing it that way.  
 
 # Crash triage & Analysis
 The triage was pretty simple, when I checked the fuzzing campaign and found a crash, I copied it in a separate folder using the [extract_crashes.sh](https://github.com/AGhebrea/fuzzing_r2/blob/master/workdir/scripts/aux/extract_crashes.sh) script and then ran them with [run_crashes.sh](https://github.com/AGhebrea/fuzzing_r2/blob/master/workdir/scripts/aux/run_crashes.sh) using an uninstrumented ASAN build of the unmodified code. If it reported an error or if it crashed, then I would manually analyze it with gdb.  
