@@ -6,7 +6,7 @@ date: 2026-05-05
 
 # Intro
 Radare2 is a widely used open-source reverse engineering framework.  
-After reading [tmpout 1/5](https://tmpout.sh/1/5.html) I decided to point [AFL++](https://github.com/aflplusplus/aflplusplus) at it, partly for practice, partly to see what would shake loose.  
+After reading [tmpout 1/5](https://tmpout.sh/1/5.html) by Architect & S01den, I decided to point [AFL++](https://github.com/aflplusplus/aflplusplus) at it, partly for practice, partly to see what would shake loose.  
 What follows is a condensed version of my notes from the campaign. I found three crashes: a NULL deref, a double free and a heap corruption. But the more interesting problems were in the setup itself, a multicore configuration where AFL++ instances silently stalled because pipe buffers filled up, and an afl-cmin crash that was manifesting because afl-cmin's forkserver handshake doesn't complete the way afl-fuzz does.  
 There's also a [github repo](https://github.com/AGhebrea/fuzzing_r2/) with all the setup scripts.  
 
