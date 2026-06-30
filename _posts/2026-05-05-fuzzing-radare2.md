@@ -169,7 +169,7 @@ Then I tried some ways to generate a core dump and the one that worked was when 
 sudo sysctl -w kernel.core_pattern=/tmp/core.%e.%p
 sudo sysctl -w fs.suid_dumpable=2
 ```
-and then loading with AFL_PRELOAD [catchsegv.so](https://github.com/AGhebrea/fuzzing_r2/blob/master/catchsegv/catchsegv.c)  
+loading with AFL_PRELOAD [catchsegv.so](https://github.com/AGhebrea/fuzzing_r2/blob/master/catchsegv/catchsegv.c) while running the fuzzing setup as root.  
 Then I could finally look at a core dump and see what was going on.  
 After getting the core dump, I was able to find the root cause. The target was compiled with afl-clang-lto. In the crashing code, *__afl_area_ptr* which was stored in the .data segment, was dereferenced, yielding *__afl_area_initial* (the static fallback bitmap). The instrumentation then wrote to *__afl_area_initial* + 0x14000, which falls outside the bounds of *__afl_area_initial* and into a different segment entirely, causing the segfault.  
 The bug is that *__afl_area_initial* is a fixed-size static buffer (0x10000 bytes), but LTO instrumentation assigned an edge ID of 0x14000, which exceeds it. This only manifests under afl-cmin because in that context the forkserver handshake does not complete correctly, leaving *__afl_area_ptr* pointing at the fallback *__afl_area_initial* instead of the properly sized shared memory region. Under afl-fuzz and afl-showmap, the handshake succeeds, *__afl_area_ptr* is updated to the real SHM, and the write is in bounds.  
